@@ -1,0 +1,169 @@
+import random
+import numpy as np
+import torch
+import torch.nn as nn
+from multiprocessing import Pool
+
+class LLMMergeGA:
+    def __init__(self, llms, benchmark_data, population_size, max_generations, crossover_rate, mutation_rate, elitism_rate, device='cpu'):
+        self.llms = llms
+        self.benchmark_data = benchmark_data
+        self.population_size = population_size
+        self.max_generations = max_generations
+        self.crossover_rate = crossover_rate
+        self.mutation_rate = mutation_rate
+        self.elitism_rate = elitism_rate
+        self.device = device
+        self.best_individual = None
+
+    def initialize_population(self):
+        population = []
+        for _ in range(self.population_size):
+            individual = self.create_individual()
+            population.append(individual)
+        return population
+
+    def create_individual(self):
+        individual = []
+        for _ in range(len(self.llms[0].layers)):
+            llm_index = random.randint(0, len(self.llms) - 1)
+            layer = random.choice(self.llms[llm_index].layers)
+            individual.append(layer)
+        return individual
+
+    def evaluate_fitness(self, individual):
+        merged_model = self.merge_layers(individual)
+        accuracy = self.evaluate_accuracy(merged_model)
+        loss = self.evaluate_loss(merged_model)
+        fitness = accuracy / loss
+        return fitness
+
+    def merge_layers(self, individual):
+        merged_model = nn.Sequential()
+        for layer in individual:
+            if self.is_compatible(layer, merged_model):
+                merged_model.add_module(str(len(merged_model)), layer)
+            else:
+                # Handle incompatible layers (e.g., skip or adapt)
+                pass
+        return merged_model
+
+    def is_compatible(self, layer, merged_model):
+        # Implement layer compatibility check based on specific requirements
+        # Example: Check input and output shapes
+        if len(merged_model) == 0:
+            return True
+        else:
+            last_layer_output_shape = merged_model[-1].out_features
+            current_layer_input_shape = layer.in_features
+            return last_layer_output_shape == current_layer_input_shape
+
+    def evaluate_accuracy(self, merged_model):
+        merged_model.to(self.device)
+        merged_model.eval()
+        inputs, targets = self.benchmark_data
+        inputs, targets = inputs.to(self.device), targets.to(self.device)
+        with torch.no_grad():
+            outputs = merged_model(inputs)
+        accuracy = self.calculate_accuracy(targets, outputs)
+        return accuracy
+
+    def evaluate_loss(self, merged_model):
+        merged_model.to(self.device)
+        merged_model.eval()
+        inputs, targets = self.benchmark_data
+        inputs, targets = inputs.to(self.device), targets.to(self.device)
+        with torch.no_grad():
+            outputs = merged_model(inputs)
+        loss = self.calculate_loss(targets, outputs)
+        return loss
+
+    def calculate_accuracy(self, targets, outputs):
+        # Implement accuracy calculation based on specific task and metrics
+        # Example: Assuming multi-class classification
+        _, predicted = torch.max(outputs, 1)
+        correct = (predicted == targets).sum().item()
+        total = targets.size(0)
+        accuracy = correct / total
+        return accuracy
+
+    def calculate_loss(self, targets, outputs):
+        # Implement loss calculation based on specific task and metrics
+        # Example: Assuming multi-class classification
+        criterion = nn.CrossEntropyLoss()
+        loss = criterion(outputs, targets)
+        return loss.item()
+
+    def selection(self, population):
+        # Implement tournament selection
+        selected_individuals = []
+        tournament_size = 3
+        for _ in range(len(population)):
+            participants = random.sample(population, tournament_size)
+            winner = max(participants, key=self.evaluate_fitness)
+            selected_individuals.append(winner)
+        return selected_individuals
+
+    def crossover(self, parent1, parent2):
+        if random.random() > self.crossover_rate:
+            return parent1
+        child = nn.Sequential()
+        for i in range(min(len(parent1), len(parent2))):
+            if self.is_compatible(parent1[i], child) and self.is_compatible(parent2[i], child):
+                child.add_module(str(len(child)), random.choice([parent1[i], parent2[i]]))
+            elif self.is_compatible(parent1[i], child):
+                child.add_module(str(len(child)), parent1[i])
+            elif self.is_compatible(parent2[i], child):
+                child.add_module(str(len(child)), parent2[i])
+        return child
+
+    def mutation(self, individual):
+        if random.random() > self.mutation_rate:
+            return individual
+        mutation_point = random.randint(0, len(individual) - 1)
+        llm_index = random.randint(0, len(self.llms) - 1)
+        new_layer = random.choice(self.llms[llm_index].layers)
+        mutated_individual = nn.Sequential()
+        for i in range(len(individual)):
+            if i == mutation_point and self.is_compatible(new_layer, mutated_individual):
+                mutated_individual.add_module(str(len(mutated_individual)), new_layer)
+            else:
+                mutated_individual.add_module(str(len(mutated_individual)), individual[i])
+        return mutated_individual
+
+    def elitism(self, population):
+        sorted_population = sorted(population, key=self.evaluate_fitness, reverse=True)
+        elite_count = int(len(population) * self.elitism_rate)
+        return sorted_population[:elite_count]
+
+    def run(self):
+        population = self.initialize_population()
+        for generation in range(self.max_generations):
+            # Evaluate fitness of each individual in parallel
+            with Pool() as pool:
+                fitness_scores = pool.map(self.evaluate_fitness, population)
+
+            # Update the best individual if necessary
+            best_individual_in_generation = max(population, key=self.evaluate_fitness)
+            if self.best_individual is None or self.evaluate_fitness(best_individual_in_generation) > self.evaluate_fitness(self.best_individual):
+                self.best_individual = best_individual_in_generation
+
+            # Perform selection
+            selected_individuals = self.selection(population)
+
+            # Perform crossover and mutation to create offspring
+            offspring = []
+            for _ in range(len(population) - len(selected_individuals)):
+                parent1, parent2 = random.sample(selected_individuals, 2)
+                child = self.crossover(parent1, parent2)
+                child = self.mutation(child)
+                offspring.append(child)
+
+            # Perform elitism
+            elite_individuals = self.elitism(population)
+
+            # Create the new population
+            population = selected_individuals + offspring + elite_individuals
+
+        # Return the best individual found during the algorithm's run
+        return self.best_individual
